@@ -37,7 +37,7 @@ impl<T> Message<T> {
 pub struct Init {
     msg_id: usize,
     /// Node id of the node receiving this message.
-    node_id: String,
+    pub node_id: String,
     /// All node ids in the cluster.
     node_ids: Vec<String>,
 }
