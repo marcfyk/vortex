@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json;
-use std::{
-    error,
-    io::{self, Write},
-};
+use std::{error, io};
 use vortex::{Message, Node};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -28,7 +25,7 @@ struct EchoNode {
 impl vortex::Node<Payload> for EchoNode {
     fn handle_message(
         &mut self,
-        writer: &mut impl Write,
+        writer: &mut impl io::Write,
         message: Message<Payload>,
     ) -> Result<(), Box<dyn error::Error>> {
         Self::update_msg_id(&mut self.msg_id_counter);

@@ -25,7 +25,7 @@ struct UniqueIdsNode {
 impl Node<Payload> for UniqueIdsNode {
     fn handle_message(
         &mut self,
-        writer: &mut impl io::prelude::Write,
+        writer: &mut impl io::Write,
         message: vortex::Message<Payload>,
     ) -> Result<(), Box<dyn error::Error>> {
         match message.body {
