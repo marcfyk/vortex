@@ -9,7 +9,7 @@ use vortex::{Message, Node};
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
-pub enum Payload {
+enum Payload {
     Echo {
         msg_id: usize,
         echo: String,
@@ -21,7 +21,7 @@ pub enum Payload {
     },
 }
 
-pub struct EchoNode {
+struct EchoNode {
     msg_id_counter: usize,
 }
 

@@ -46,7 +46,7 @@ pub struct Init {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename = "init_ok")]
-pub struct InitOk {
+struct InitOk {
     in_reply_to: usize,
 }
 
