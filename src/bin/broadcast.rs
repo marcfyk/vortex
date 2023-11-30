@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json;
-use std::{collections::HashMap, error, io};
+use std::{
+    collections::{HashMap, HashSet},
+    error, io,
+};
 use vortex::{Message, Node};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 enum Payload {
@@ -36,7 +39,7 @@ enum Payload {
 struct BroadcastNode {
     id: String,
     msg_id_counter: usize,
-    messages: Vec<usize>,
+    messages: HashSet<usize>,
     neighbors: Vec<String>,
 }
 
@@ -48,11 +51,23 @@ impl Node<Payload> for BroadcastNode {
     ) -> Result<(), Box<dyn error::Error>> {
         match msg.body {
             Payload::Broadcast { msg_id, message } => {
+                if !self.messages.contains(&message) {
+                    self.neighbors
+                        .iter()
+                        .filter(|&n| *n != msg.src && *n != msg.dest)
+                        .map(|n| Message {
+                            src: self.id.clone(),
+                            dest: n.to_string(),
+                            body: Payload::Broadcast { msg_id, message },
+                        })
+                        .try_for_each(|m| m.write(writer))?;
+                }
+
                 Self::update_msg_id(&mut self.msg_id_counter);
-                self.messages.push(message);
+                self.messages.insert(message);
                 let m = Message {
                     src: msg.dest,
-                    dest: msg.src,
+                    dest: msg.src.clone(),
                     body: Payload::BroadcastOk {
                         msg_id: self.msg_id_counter,
                         in_reply_to: msg_id,
@@ -69,7 +84,7 @@ impl Node<Payload> for BroadcastNode {
                     body: Payload::ReadOk {
                         msg_id: self.msg_id_counter,
                         in_reply_to: msg_id,
-                        messages: self.messages.clone(),
+                        messages: self.messages.iter().copied().collect(),
                     },
                 };
                 m.write(writer)?;
@@ -99,7 +114,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     let mut node = BroadcastNode {
         id: init.body.node_id,
         msg_id_counter: 0,
-        messages: Vec::new(),
+        messages: HashSet::new(),
         neighbors: Vec::new(),
     };
 
