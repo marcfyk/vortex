@@ -55,10 +55,16 @@ impl Node<Payload> for BroadcastNode {
                     self.neighbors
                         .iter()
                         .filter(|&n| *n != msg.src && *n != msg.dest)
-                        .map(|n| Message {
-                            src: self.id.clone(),
-                            dest: n.to_string(),
-                            body: Payload::Broadcast { msg_id, message },
+                        .map(|n| {
+                            Self::update_msg_id(&mut self.msg_id_counter);
+                            return Message {
+                                src: self.id.clone(),
+                                dest: n.to_string(),
+                                body: Payload::Broadcast {
+                                    msg_id: self.msg_id_counter,
+                                    message,
+                                },
+                            };
                         })
                         .try_for_each(|m| m.write(writer))?;
                 }
