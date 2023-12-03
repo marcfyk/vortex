@@ -3,8 +3,16 @@ use serde_json;
 use std::{
     collections::{HashMap, HashSet},
     error, io,
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 use vortex::{Message, Node};
+
+struct UnAckedMessage {
+    node: String,
+    message: usize,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
@@ -34,6 +42,7 @@ enum Payload {
         msg_id: usize,
         in_reply_to: usize,
     },
+    ResendUnAcked,
 }
 
 struct BroadcastNode {
@@ -41,6 +50,7 @@ struct BroadcastNode {
     msg_id_counter: usize,
     messages: HashSet<usize>,
     neighbors: Vec<String>,
+    message_buffer: HashMap<usize, UnAckedMessage>,
 }
 
 impl Node<Payload> for BroadcastNode {
@@ -57,14 +67,18 @@ impl Node<Payload> for BroadcastNode {
                         .filter(|&n| *n != msg.src && *n != msg.dest)
                         .map(|n| {
                             Self::update_msg_id(&mut self.msg_id_counter);
-                            return Message {
-                                src: self.id.clone(),
-                                dest: n.to_string(),
-                                body: Payload::Broadcast {
-                                    msg_id: self.msg_id_counter,
+                            let src = self.id.clone();
+                            let dest = n.to_string();
+                            let msg_id = self.msg_id_counter;
+                            let body = Payload::Broadcast { msg_id, message };
+                            self.message_buffer.insert(
+                                msg_id,
+                                UnAckedMessage {
+                                    node: n.to_string(),
                                     message,
                                 },
-                            };
+                            );
+                            Message { src, dest, body }
                         })
                         .try_for_each(|m| m.write(writer))?;
                 }
@@ -81,7 +95,9 @@ impl Node<Payload> for BroadcastNode {
                 };
                 m.write(writer)?;
             }
-            Payload::BroadcastOk { .. } => {}
+            Payload::BroadcastOk { in_reply_to, .. } => {
+                self.message_buffer.remove(&in_reply_to);
+            }
             Payload::Read { msg_id } => {
                 Self::update_msg_id(&mut self.msg_id_counter);
                 let m = Message {
@@ -110,7 +126,28 @@ impl Node<Payload> for BroadcastNode {
                 m.write(writer)?;
             }
             Payload::TopologyOk { .. } => {}
-        }
+            Payload::ResendUnAcked => {
+                let mut updated_message_buffer = HashMap::new();
+                for UnAckedMessage { node, message } in self.message_buffer.values() {
+                    Self::update_msg_id(&mut self.msg_id_counter);
+                    let src = self.id.to_string();
+                    let dest = node.to_string();
+                    let msg_id = self.msg_id_counter;
+                    let message = *message;
+                    let body = Payload::Broadcast { msg_id, message };
+                    updated_message_buffer.insert(
+                        msg_id,
+                        UnAckedMessage {
+                            node: dest.to_string(),
+                            message,
+                        },
+                    );
+                    let m = Message { src, dest, body };
+                    m.write(writer)?;
+                }
+                self.message_buffer = updated_message_buffer;
+            }
+        };
         Ok(())
     }
 }
@@ -118,20 +155,55 @@ impl Node<Payload> for BroadcastNode {
 fn main() -> Result<(), Box<dyn error::Error>> {
     let init = vortex::init()?;
     let mut node = BroadcastNode {
-        id: init.body.node_id,
+        id: init.body.node_id.clone(),
         msg_id_counter: 0,
         messages: HashSet::new(),
         neighbors: Vec::new(),
+        message_buffer: HashMap::new(),
     };
 
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let (message_tx, message_rx) = mpsc::channel();
+    let resend_tx = message_tx.clone();
+    let message_handler = thread::spawn(move || {
+        let stdin = io::stdin();
+        for line in stdin.lines() {
+            let line = line.expect("no line read from stdin");
+            let message: Message<Payload> =
+                serde_json::from_str(&line).expect("could not parse message");
+            message_tx.send(message).expect("could not send message");
+        }
+    });
 
-    for line in stdin.lines() {
-        let line = line?;
-        let message: Message<Payload> = serde_json::from_str(&line)?;
+    let (terminate_resend_tx, terminate_resend_rx) = mpsc::channel();
+    let resend_handler = thread::spawn(move || {
+        let interval = Duration::from_millis(1000);
+        loop {
+            thread::sleep(interval);
+            if let Ok(()) = terminate_resend_rx.try_recv() {
+                break;
+            }
+            let message: Message<Payload> = Message {
+                src: init.body.node_id.clone(),
+                dest: init.body.node_id.clone(),
+                body: Payload::ResendUnAcked {},
+            };
+            resend_tx.send(message).expect("could not send message");
+        }
+    });
+
+    let mut stdout = io::stdout();
+    for message in message_rx {
         node.handle_message(&mut stdout, message)?;
     }
+
+    message_handler
+        .join()
+        .expect("could not join message handler");
+
+    terminate_resend_tx
+        .send(())
+        .expect("could not send terminating message to thread");
+    resend_handler.join().expect("could not resend handler");
 
     Ok(())
 }
