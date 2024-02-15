@@ -4,7 +4,11 @@ usage() {
     echo "usage: $0 <maelstrom-binary-path>"
 }
 
-if ! test -f $1; then
+if [ -z $1 ]; then
+    echo "no maelstrom binary path provided"
+    usage
+    return 1
+elif ! test -f $1; then
     echo "maelstrom binary not found"
     usage
     return 1
