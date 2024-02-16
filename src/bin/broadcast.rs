@@ -1,10 +1,11 @@
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::{
     collections::{HashMap, HashSet},
-    error, io,
+    error,
+    io::{self, BufRead},
 };
-use vortex::{Message, Node};
+use vortex::{Init, Message, Node, StateMachine};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
@@ -43,91 +44,95 @@ struct BroadcastNode {
     neighbors: Vec<String>,
 }
 
-impl Node<Payload> for BroadcastNode {
-    fn handle_message(
-        &mut self,
-        writer: &mut impl io::Write,
-        msg: Message<Payload>,
-    ) -> Result<(), Box<dyn error::Error>> {
-        match msg.body {
-            Payload::Broadcast { msg_id, message } => {
-                if !self.messages.contains(&message) {
-                    self.neighbors
-                        .iter()
-                        .filter(|&n| *n != msg.src && *n != msg.dest)
-                        .map(|n| {
-                            Self::update_msg_id(&mut self.msg_id_counter);
-                            let src = self.id.clone();
-                            let dest = n.to_string();
-                            let msg_id = self.msg_id_counter;
-                            let body = Payload::Broadcast { msg_id, message };
-                            Message { src, dest, body }
-                        })
-                        .try_for_each(|m| m.write(writer))?;
-                }
+impl BroadcastNode {
+    fn new(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            msg_id_counter: 0,
+            messages: HashSet::new(),
+            neighbors: Vec::new(),
+        }
+    }
+}
 
-                Self::update_msg_id(&mut self.msg_id_counter);
-                self.messages.insert(message);
-                let m = Message {
-                    src: msg.dest,
-                    dest: msg.src.clone(),
-                    body: Payload::BroadcastOk {
-                        msg_id: self.msg_id_counter,
-                        in_reply_to: msg_id,
-                    },
-                };
-                m.write(writer)?;
+impl StateMachine<Payload> for BroadcastNode {
+    fn apply(&mut self, messages: Vec<Message<Payload>>) -> Result<Vec<Message<Payload>>> {
+        let mut responses = Vec::new();
+        for message in messages {
+            let Message { src, dest, body } = message;
+            match body {
+                Payload::Broadcast { msg_id, message } => {
+                    if !self.messages.contains(&message) {
+                        self.neighbors
+                            .iter()
+                            .filter(|&n| *n != src && *n != dest)
+                            .map(|n| {
+                                self.msg_id_counter += 1;
+                                let src = self.id.to_string();
+                                let dest = n.to_string();
+                                let msg_id = self.msg_id_counter;
+                                let body = Payload::Broadcast { msg_id, message };
+                                Message { src, dest, body }
+                            })
+                            .for_each(|m| responses.push(m));
+                    }
+                    self.msg_id_counter += 1;
+                    self.messages.insert(message);
+                    responses.push(Message {
+                        src: dest,
+                        dest: src,
+                        body: Payload::BroadcastOk {
+                            msg_id: self.msg_id_counter,
+                            in_reply_to: msg_id,
+                        },
+                    });
+                }
+                Payload::Read { msg_id } => {
+                    self.msg_id_counter += 1;
+                    responses.push(Message {
+                        src: dest,
+                        dest: src,
+                        body: Payload::ReadOk {
+                            msg_id: self.msg_id_counter,
+                            in_reply_to: msg_id,
+                            messages: self.messages.iter().copied().collect(),
+                        },
+                    });
+                }
+                Payload::Topology { msg_id, topology } => {
+                    self.msg_id_counter += 1;
+                    self.neighbors = topology.get(&self.id).unwrap_or(&vec![]).clone();
+                    responses.push(Message {
+                        src: dest,
+                        dest: src,
+                        body: Payload::TopologyOk {
+                            msg_id: self.msg_id_counter,
+                            in_reply_to: msg_id,
+                        },
+                    });
+                }
+                _ => {}
             }
-            Payload::BroadcastOk { .. } => {}
-            Payload::Read { msg_id } => {
-                Self::update_msg_id(&mut self.msg_id_counter);
-                let m = Message {
-                    src: msg.dest,
-                    dest: msg.src,
-                    body: Payload::ReadOk {
-                        msg_id: self.msg_id_counter,
-                        in_reply_to: msg_id,
-                        messages: self.messages.iter().copied().collect(),
-                    },
-                };
-                m.write(writer)?;
-            }
-            Payload::ReadOk { .. } => {}
-            Payload::Topology { msg_id, topology } => {
-                Self::update_msg_id(&mut self.msg_id_counter);
-                self.neighbors = topology.get(&self.id).unwrap_or(&vec![]).clone();
-                let m = Message {
-                    src: msg.dest,
-                    dest: msg.src,
-                    body: Payload::TopologyOk {
-                        msg_id: self.msg_id_counter,
-                        in_reply_to: msg_id,
-                    },
-                };
-                m.write(writer)?;
-            }
-            Payload::TopologyOk { .. } => {}
-        };
-        Ok(())
+        }
+        Ok(responses)
     }
 }
 
 fn main() -> Result<(), Box<dyn error::Error>> {
-    let init = vortex::init()?;
-    let mut node = BroadcastNode {
-        id: init.body.node_id.clone(),
-        msg_id_counter: 0,
-        messages: HashSet::new(),
-        neighbors: Vec::new(),
-    };
+    let mut stdin = io::stdin().lock();
+    let mut stdout = io::stdout().lock();
 
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let init: Message<Init> = Message::from_reader(&mut stdin)?;
+    let id = init.body.node_id.to_string();
+    let (mut node, resp) = Node::init(init, Box::new(BroadcastNode::new(&id)));
+    resp.write(&mut stdout)?;
+
     for line in stdin.lines() {
-        let line = line?;
-        let message: Message<Payload> = serde_json::from_str(&line)?;
-        node.handle_message(&mut stdout, message)?;
+        let message: Message<Payload> = Message::from_str(&line?)?;
+        let responses = node.recv_messages(vec![message])?;
+        for res in responses {
+            res.write(&mut stdout)?;
+        }
     }
-
     Ok(())
 }

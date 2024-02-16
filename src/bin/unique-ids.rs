@@ -1,7 +1,10 @@
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json;
-use std::{error, io};
-use vortex::{self, Message, Node};
+use std::{
+    error,
+    io::{self, BufRead},
+};
+use vortex::{Init, Message, Node, StateMachine};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -22,48 +25,51 @@ struct UniqueIdsNode {
     msg_id_counter: usize,
 }
 
-impl Node<Payload> for UniqueIdsNode {
-    fn handle_message(
-        &mut self,
-        writer: &mut impl io::Write,
-        message: vortex::Message<Payload>,
-    ) -> Result<(), Box<dyn error::Error>> {
-        match message.body {
-            Payload::Generate { msg_id } => {
-                Self::update_msg_id(&mut self.msg_id_counter);
-                let id = format!("{}/{}", self.id, self.msg_id_counter);
-                let m = Message {
-                    src: message.dest,
-                    dest: message.src,
+impl UniqueIdsNode {
+    fn new(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            msg_id_counter: 0,
+        }
+    }
+}
+
+impl StateMachine<Payload> for UniqueIdsNode {
+    fn apply(&mut self, messages: Vec<Message<Payload>>) -> Result<Vec<Message<Payload>>> {
+        let mut responses = Vec::new();
+        for Message { src, dest, body } in messages {
+            if let Payload::Generate { msg_id } = body {
+                self.msg_id_counter += 1;
+                responses.push(Message {
+                    src: dest,
+                    dest: src,
                     body: Payload::GenerateOk {
                         msg_id: self.msg_id_counter,
                         in_reply_to: msg_id,
-                        id,
+                        id: format!("{}/{}", self.id, self.msg_id_counter),
                     },
-                };
-                m.write(writer)?;
+                });
             }
-            Payload::GenerateOk { .. } => {}
         }
-        Ok(())
+        Ok(responses)
     }
 }
 
 fn main() -> Result<(), Box<dyn error::Error>> {
-    let init = vortex::init()?;
-    let mut node = UniqueIdsNode {
-        id: init.body.node_id,
-        msg_id_counter: 0,
-    };
+    let mut stdin = io::stdin().lock();
+    let mut stdout = io::stdout().lock();
 
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let init: Message<Init> = Message::from_reader(&mut stdin)?;
+    let id = init.body.node_id.to_string();
+    let (mut node, resp) = Node::init(init, Box::new(UniqueIdsNode::new(&id)));
+    resp.write(&mut stdout)?;
 
     for line in stdin.lines() {
-        let line = line?;
-        let message: Message<Payload> = serde_json::from_str(&line)?;
-        node.handle_message(&mut stdout, message)?;
+        let message: Message<Payload> = Message::from_str(&line?)?;
+        let responses = node.recv_messages(vec![message])?;
+        for res in responses {
+            res.write(&mut stdout)?;
+        }
     }
-
     Ok(())
 }
