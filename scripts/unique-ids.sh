@@ -14,6 +14,9 @@ elif ! test -f $1; then
     return 1
 fi
 
-cargo build --release 2> /dev/null
-
-$1 test -w unique-ids --bin ./target/release/unique-ids --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition
+if cargo build --release ; then
+    $1 test -w unique-ids --bin ./target/release/unique-ids --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition
+else 
+    echo "cargo build error"
+    return 1
+fi

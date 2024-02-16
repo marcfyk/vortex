@@ -14,6 +14,9 @@ elif ! test -f $1; then
     return 1
 fi
 
-cargo build --release 2> /dev/null
-
-$1 test -w echo --bin ./target/release/echo --node-count 1 --time-limit 10
+if cargo build --release ; then
+    $1 test -w echo --bin ./target/release/echo --node-count 1 --time-limit 10
+else
+    echo "cargo build error"
+    return 1
+fi
