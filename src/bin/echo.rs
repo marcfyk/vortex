@@ -1,12 +1,14 @@
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::io::{self, BufRead};
-use vortex::{Init, Message, Node, StateMachine};
+use std::{
+    error,
+    io::{self, BufRead},
+};
+use vortex::{Message, Node, Payload, StateMachine};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
-enum Payload {
+enum Data {
     Echo {
         msg_id: usize,
         echo: String,
@@ -29,20 +31,23 @@ impl EchoNode {
     }
 }
 
-impl StateMachine<Payload> for EchoNode {
-    fn apply(&mut self, messages: Vec<Message<Payload>>) -> Result<Vec<Message<Payload>>> {
+impl StateMachine<Data> for EchoNode {
+    fn apply(
+        &mut self,
+        messages: Vec<Message<Data>>,
+    ) -> Result<Vec<Message<Data>>, Box<dyn error::Error>> {
         let mut responses = Vec::new();
         for Message { src, dest, body } in messages {
-            if let Payload::Echo { msg_id, echo } = body {
+            if let Payload::Custom(Data::Echo { msg_id, echo }) = body {
                 self.msg_id_counter += 1;
                 responses.push(Message {
                     src: dest,
                     dest: src,
-                    body: Payload::EchoOk {
+                    body: Payload::Custom(Data::EchoOk {
                         msg_id: self.msg_id_counter,
                         in_reply_to: msg_id,
                         echo,
-                    },
+                    }),
                 });
             }
         }
@@ -50,16 +55,16 @@ impl StateMachine<Payload> for EchoNode {
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<(), Box<dyn error::Error>> {
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
 
-    let init: Message<Init> = Message::from_reader(&mut stdin)?;
-    let (mut node, resp) = Node::init(init, Box::new(EchoNode::new()));
+    let init: Message<Data> = Message::from_reader(&mut stdin)?;
+    let (mut node, resp) = Node::init(init, Box::new(EchoNode::new()))?;
     resp.write(&mut stdout)?;
 
     for line in stdin.lines() {
-        let message: Message<Payload> = Message::from_str(&line?)?;
+        let message: Message<Data> = Message::from_str(&line?)?;
         let responses = node.recv_messages(vec![message])?;
         for res in responses {
             res.write(&mut stdout)?;

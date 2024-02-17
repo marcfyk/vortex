@@ -1,15 +1,14 @@
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
     error,
     io::{self, BufRead},
 };
-use vortex::{Init, Message, Node, StateMachine};
+use vortex::{Message, MessageError, Node, Payload, StateMachine};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
-enum Payload {
+enum Data {
     Generate {
         msg_id: usize,
     },
@@ -34,20 +33,23 @@ impl UniqueIdsNode {
     }
 }
 
-impl StateMachine<Payload> for UniqueIdsNode {
-    fn apply(&mut self, messages: Vec<Message<Payload>>) -> Result<Vec<Message<Payload>>> {
+impl StateMachine<Data> for UniqueIdsNode {
+    fn apply(
+        &mut self,
+        messages: Vec<Message<Data>>,
+    ) -> Result<Vec<Message<Data>>, Box<dyn error::Error>> {
         let mut responses = Vec::new();
         for Message { src, dest, body } in messages {
-            if let Payload::Generate { msg_id } = body {
+            if let Payload::Custom(Data::Generate { msg_id }) = body {
                 self.msg_id_counter += 1;
                 responses.push(Message {
                     src: dest,
                     dest: src,
-                    body: Payload::GenerateOk {
+                    body: Payload::Custom(Data::GenerateOk {
                         msg_id: self.msg_id_counter,
                         in_reply_to: msg_id,
                         id: format!("{}/{}", self.id, self.msg_id_counter),
-                    },
+                    }),
                 });
             }
         }
@@ -59,13 +61,16 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
 
-    let init: Message<Init> = Message::from_reader(&mut stdin)?;
-    let id = init.body.node_id.to_string();
-    let (mut node, resp) = Node::init(init, Box::new(UniqueIdsNode::new(&id)));
+    let init: Message<Data> = Message::from_reader(&mut stdin)?;
+    let id = match &init.body {
+        Payload::Init { node_id, .. } => Ok(node_id.to_string()),
+        _ => Err(MessageError::Invalid),
+    }?;
+    let (mut node, resp) = Node::init(init, Box::new(UniqueIdsNode::new(&id)))?;
     resp.write(&mut stdout)?;
 
     for line in stdin.lines() {
-        let message: Message<Payload> = Message::from_str(&line?)?;
+        let message: Message<Data> = Message::from_str(&line?)?;
         let responses = node.recv_messages(vec![message])?;
         for res in responses {
             res.write(&mut stdout)?;
